@@ -1,0 +1,322 @@
+name: Teams PR Notifications
+
+on:
+  pull_request:
+    types: [opened, closed, reopened]
+  pull_request_review:
+    types: [submitted, dismissed]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  workflow_dispatch:
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Set notification details
+        id: details
+        run: |
+          EVENT="${{ github.event_name }}"
+          ACTION="${{ github.event.action }}"
+          
+          # Force merged status to a clear string "true" or "false"
+          IS_MERGED=$(jq -r '.pull_request.merged | if . == true then "true" else "false" end' "$GITHUB_EVENT_PATH")
+          
+          REVIEW_STATE=$(jq -r '.review.state // "commented"' "$GITHUB_EVENT_PATH" | tr '[:upper:]' '[:lower:]')
+          REVIEW_BODY=$(jq -r '.review.body // ""' "$GITHUB_EVENT_PATH")
+          COMMENT_BODY=$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")
+          COMMENT_URL=$(jq -r '.comment.html_url // ""' "$GITHUB_EVENT_PATH")
+          PR_RAW_DESC=$(jq -r '.pull_request.body // "No description provided."' "$GITHUB_EVENT_PATH" | head -c 300)
+
+          PR_STATE=$(jq -r '.pull_request.state // "open"' "$GITHUB_EVENT_PATH")
+          PR_AUTHOR=$(jq -r '.pull_request.user.login // "unknown"' "$GITHUB_EVENT_PATH")
+          PR_AUTHOR_URL="https://github.com/${PR_AUTHOR}.png"
+          PR_CREATED_AT=$(jq -r '.pull_request.created_at // ""' "$GITHUB_EVENT_PATH")
+          
+          if [ -n "$PR_CREATED_AT" ]; then
+            PR_DATE_DISPLAY=$(date -d "$PR_CREATED_AT" "+%a, %d %b %Y %H:%M")
+          else
+            PR_DATE_DISPLAY="Unknown"
+          fi
+
+          echo "pr_state=$PR_STATE" >> $GITHUB_OUTPUT
+          echo "pr_author=$PR_AUTHOR" >> $GITHUB_OUTPUT
+          echo "pr_author_url=$PR_AUTHOR_URL" >> $GITHUB_OUTPUT
+          echo "pr_date=$PR_DATE_DISPLAY" >> $GITHUB_OUTPUT
+          echo "is_merged=$IS_MERGED" >> $GITHUB_OUTPUT
+
+          D_DELIM=$(openssl rand -hex 8)
+          echo "description<<$D_DELIM" >> $GITHUB_OUTPUT
+          echo "$PR_RAW_DESC" >> $GITHUB_OUTPUT
+          echo "$D_DELIM" >> $GITHUB_OUTPUT
+
+          if [ "$EVENT" = "pull_request" ]; then
+            if [ "$ACTION" = "opened" ] || [ "$ACTION" = "reopened" ]; then
+              echo "title=New GitHub pull request" >> $GITHUB_OUTPUT
+              echo "layout=emphasis" >> $GITHUB_OUTPUT
+              echo "show_full_details=true" >> $GITHUB_OUTPUT
+            elif [ "$ACTION" = "closed" ] && [ "$IS_MERGED" = "true" ]; then
+              echo "title=Pull Request Merged" >> $GITHUB_OUTPUT
+              echo "color=accent" >> $GITHUB_OUTPUT
+            elif [ "$ACTION" = "closed" ]; then
+              echo "title=Pull Request Closed" >> $GITHUB_OUTPUT
+            fi
+          elif [ "$EVENT" = "pull_request_review" ]; then
+            echo "layout=emphasis" >> $GITHUB_OUTPUT
+            if [ "$ACTION" = "dismissed" ]; then echo "title=PR Review Cancelled" >> $GITHUB_OUTPUT && echo "color=attention" >> $GITHUB_OUTPUT;
+            elif [ "$REVIEW_STATE" = "approved" ]; then echo "title=Pull Request Approved" >> $GITHUB_OUTPUT && echo "color=good" >> $GITHUB_OUTPUT;
+            elif [ "$REVIEW_STATE" = "changes_requested" ]; then echo "title=Changes Requested" >> $GITHUB_OUTPUT && echo "color=warning" >> $GITHUB_OUTPUT;
+            else echo "title=Review Comment Added" >> $GITHUB_OUTPUT && echo "button_text=View comment" >> $GITHUB_OUTPUT; fi
+            C_DELIM=$(openssl rand -hex 8)
+            echo "comment<<$C_DELIM" >> $GITHUB_OUTPUT
+            echo "$REVIEW_BODY" >> $GITHUB_OUTPUT
+            echo "$C_DELIM" >> $GITHUB_OUTPUT
+          elif [ "$EVENT" = "pull_request_review_comment" ]; then
+             echo "title=Line comment Added" >> $GITHUB_OUTPUT
+             echo "layout=emphasis" >> $GITHUB_OUTPUT
+             echo "comment=${COMMENT_BODY:-New line comment}" >> $GITHUB_OUTPUT
+             echo "button_text=View line comment" >> $GITHUB_OUTPUT
+             echo "target_url=$COMMENT_URL" >> $GITHUB_OUTPUT
+          elif [ "$EVENT" = "issue_comment" ]; then
+             echo "title=Comment Added" >> $GITHUB_OUTPUT
+             echo "layout=emphasis" >> $GITHUB_OUTPUT
+             echo "comment=${COMMENT_BODY:-New comment}" >> $GITHUB_OUTPUT
+             echo "button_text=View comment" >> $GITHUB_OUTPUT
+             echo "target_url=$COMMENT_URL" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Teams notification
+        if: steps.details.outputs.title != ''
+        env:
+          TITLE: ${{ steps.details.outputs.title }}
+          LAYOUT: ${{ steps.details.outputs.layout || 'default' }}
+          COLOR: ${{ steps.details.outputs.color || 'default' }}
+          BUTTON_TEXT: ${{ steps.details.outputs.button_text || 'View Pull Request' }}
+          PR_NAME: ${{ github.event.pull_request.title || github.event.issue.title || 'Unknown PR' }}
+          PR_DESC: ${{ steps.details.outputs.description }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || '0' }}
+          PR_URL: ${{ github.event.pull_request.html_url || github.event.issue.html_url || 'https://github.com' }}
+          TARGET_URL: ${{ steps.details.outputs.target_url }}
+          REPO: ${{ github.repository }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          WEBHOOK_URL: ${{ secrets.PR_DASHBOARD_TEAMS_WEBHOOK_URL }}
+          PR_DASHBOARD_APP_URL: ${{ secrets.PR_DASHBOARD_APP_URL }}
+          PR_STATE: ${{ steps.details.outputs.pr_state }}
+          PR_AUTHOR: ${{ steps.details.outputs.pr_author }}
+          PR_AUTHOR_URL: ${{ steps.details.outputs.pr_author_url }}
+          PR_DATE: ${{ steps.details.outputs.pr_date }}
+          SHOW_FULL: ${{ steps.details.outputs.show_full_details || 'false' }}
+          COMMENT_BODY: ${{ steps.details.outputs.comment }}
+          IS_MERGED_STR: ${{ steps.details.outputs.is_merged || 'false' }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_URL: https://github.com/${{ github.actor }}.png
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          build_row() {
+            local label="$1"; local val="$2"; local is_img="${3:-false}"; local img_url="${4:-}"
+            # Ensure no empty lines between jq and its arguments
+            jq -c -n --arg label "$label" --arg val "$val" --argjson is_img "$is_img" --arg img_url "$img_url" \
+            '{
+              "type": "ColumnSet", "spacing": "Small",
+              "columns": [
+                { "type": "Column", "width": "100px", "items": [{ "type": "TextBlock", "text": $label, "weight": "Bolder" }] },
+                { "type": "Column", "width": "stretch", "items": (
+                  if $is_img and ($img_url != "") then [
+                    { "type": "ColumnSet", "columns": [
+                      { "type": "Column", "width": "auto", "items": [{ "type": "Image", "url": $img_url, "size": "Small", "style": "Person" }] },
+                      { "type": "Column", "width": "stretch", "verticalContentAlignment": "Center", "items": [{ "type": "TextBlock", "text": $val, "wrap": true }] }
+                    ]}
+                  ] else [ { "type": "TextBlock", "text": $val, "wrap": true } ] end
+                )}
+              ]
+            }'
+          }
+
+          ROW1=$(build_row "Repository" "$REPO")
+          ROW2=$(build_row "PR" "#$PR_NUMBER $PR_NAME")
+
+          PR_LINK_ROWS="[]"
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$EVENT_ACTION" = "closed" ]; then
+            PR_LINK_ROW=$(build_row "PR Link" "[$REPO/$PR_NUMBER]($PR_URL)")
+            PR_LINK_ROWS=$(jq -c -n --argjson r "$PR_LINK_ROW" '[$r]')
+          fi
+          
+          FULL_DETAILS="[]"
+          if [ "$SHOW_FULL" = "true" ]; then
+            R_LINK=$(build_row "PR Link" "[$REPO/$PR_NUMBER]($PR_URL)")
+            R_STATE=$(build_row "PR State" "$PR_STATE")
+            R_DATE=$(build_row "Created At" "$PR_DATE")
+            R_AUTH=$(build_row "Created by" "$PR_AUTHOR" "true" "$PR_AUTHOR_URL")
+            FULL_DETAILS=$(jq -c -n --argjson r1 "$R_LINK" --argjson r2 "$R_STATE" --argjson r3 "$R_DATE" --argjson r4 "$R_AUTH" '[$r1, $r2, $r3, $r4]')
+          fi
+
+          COMMENT_ROWS="[]"
+          if [ -n "$COMMENT_BODY" ] && [ "$COMMENT_BODY" != "null" ]; then
+            C_ROW=$(build_row "Comment" "$COMMENT_BODY")
+            COMMENT_ROWS=$(jq -c -n --argjson r "$C_ROW" '[$r]')
+          fi
+
+          FACTS_BODY=$(jq -c -n --argjson r1 "$ROW1" --argjson r2 "$ROW2" --argjson links "$PR_LINK_ROWS" --argjson full "$FULL_DETAILS" --argjson comm "$COMMENT_ROWS" '[$r1, $r2] + $links + $full + $comm')
+
+          if [ "$LAYOUT" = "emphasis" ]; then
+            HEADER=$(jq -c -n --arg title "$TITLE" --arg name "$PR_NAME" --arg desc "$PR_DESC" --arg color "${COLOR:-default}" \
+              '{"type": "Container", "style": $color, "bleed": true, "items": [{"type": "TextBlock", "text": (" " + $title), "size": "Small", "isSubtle": true}, {"type": "TextBlock", "text": $name, "weight": "Bolder", "size": "Large", "wrap": true}, {"type": "TextBlock", "text": $desc, "wrap": true, "isSubtle": true, "spacing": "Small"}]}')
+          else
+            HEADER=$(jq -c -n --arg title "$TITLE" --arg actor "$ACTOR" --arg url "$ACTOR_URL" --arg color "${COLOR:-default}" \
+              '{"type": "Container", "style": $color, "bleed": true, "items": [{"type": "ColumnSet", "columns": [{"type": "Column", "width": "auto", "items": [{"type": "Image", "url": $url, "size": "Small", "style": "Person"}]}, {"type": "Column", "width": "stretch", "items": [{"type": "TextBlock", "text": $title, "weight": "Bolder", "size": "Medium", "wrap": true}, {"type": "TextBlock", "text": ("By **" + $actor + "**"), "spacing": "None", "isSubtle": true}]}]}]}')
+          fi
+
+          FINAL_ACT_URL="${TARGET_URL:-$PR_URL}"
+          
+          # Action rules:
+          # - opened/reopened PR: only "Start review"
+          # - closed PR: no action button
+          # - other events: default button
+          if [ "$EVENT_NAME" = "pull_request" ] && { [ "$EVENT_ACTION" = "opened" ] || [ "$EVENT_ACTION" = "reopened" ]; } && [ -n "$PR_DASHBOARD_APP_URL" ]; then
+            BASE_URL=$(echo "$PR_DASHBOARD_APP_URL" | sed 's|/$||')
+            REVIEW_URL="$BASE_URL/review/$REPO_OWNER/$REPO_NAME/$PR_NUMBER"
+            ACTIONS=$(jq -c -n --arg url "$REVIEW_URL" '[{"type":"Action.OpenUrl","title":"Start review","url":$url,"style":"positive"}]')
+          elif [ "$EVENT_NAME" = "pull_request" ] && [ "$EVENT_ACTION" = "closed" ]; then
+            ACTIONS='[]'
+          else
+            ACTIONS=$(jq -c -n --arg url "$FINAL_ACT_URL" --arg text "$BUTTON_TEXT" '[{"type":"Action.OpenUrl","title":$text,"url":$url}]')
+          fi
+
+          # For review/comment events, send a legacy MessageCard so the button matches
+          # the same purple outlined Teams style used by "started the PR review" cards.
+          if [ "$EVENT_NAME" = "pull_request_review" ] || [ "$EVENT_NAME" = "pull_request_review_comment" ] || [ "$EVENT_NAME" = "issue_comment" ]; then
+            THEME_COLOR="0076D7"
+            if [ "$COLOR" = "good" ]; then
+              THEME_COLOR="2EA043"
+            elif [ "$COLOR" = "attention" ]; then
+              THEME_COLOR="D29922"
+            elif [ "$COLOR" = "warning" ]; then
+              THEME_COLOR="D1242F"
+            fi
+
+            FACTS=$(jq -c -n \
+              --arg repo "$REPO" \
+              --arg pr "#$PR_NUMBER $PR_NAME" \
+              --arg prLink "[$REPO/$PR_NUMBER]($PR_URL)" \
+              --arg comment "$COMMENT_BODY" \
+              '[
+                {"name":"Repository","value":$repo},
+                {"name":"PR","value":$pr},
+                {"name":"PR Link","value":$prLink}
+              ] + (if ($comment != "" and $comment != "null") then [{"name":"Comment","value":$comment}] else [] end)')
+
+            PAYLOAD=$(jq -c -n \
+              --arg title "$TITLE" \
+              --arg actor "$ACTOR" \
+              --arg actorUrl "$ACTOR_URL" \
+              --arg color "$THEME_COLOR" \
+              --argjson facts "$FACTS" \
+              '{
+                "@type": "MessageCard",
+                "@context": "http://schema.org/extensions",
+                "themeColor": $color,
+                "summary": $title,
+                "sections": [{
+                  "activityTitle": $title,
+                  "activitySubtitle": ("By **" + $actor + "**"),
+                  "activityImage": $actorUrl,
+                  "facts": $facts,
+                  "markdown": true
+                }]
+              }')
+
+            curl -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL"
+            exit 0
+          fi
+
+          if [ "$IS_MERGED_STR" = "true" ] && [ -n "$PR_DASHBOARD_APP_URL" ]; then
+            BASE_URL=$(echo "$PR_DASHBOARD_APP_URL" | sed 's|/$||')
+            RELEASE_URL="$BASE_URL/create-release/$REPO_OWNER/$REPO_NAME"
+            ACTIONS=$(echo "$ACTIONS" | jq -c --arg url "$RELEASE_URL" '. + [{"type":"Action.OpenUrl","title":"Create new release","url":$url,"style":"accent"}]')
+          fi
+
+          BODY_FINAL=$(jq -c -n --argjson head "$HEADER" --argjson facts "$FACTS_BODY" '[$head] + $facts')
+          PAYLOAD=$(jq -c -n --argjson body "$BODY_FINAL" --argjson actions "$ACTIONS" '{"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": {"$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "type": "AdaptiveCard", "version": "1.4", "body": $body, "actions": $actions}}]}')
+          
+          curl -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL"
+
+      - name: Send Release Summary Card
+        if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PR_DASHBOARD_APP_URL: ${{ secrets.PR_DASHBOARD_APP_URL }}
+          WEBHOOK_URL: ${{ secrets.PR_DASHBOARD_TEAMS_WEBHOOK_URL }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NAME: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          MERGED_AT: ${{ github.event.pull_request.merged_at }}
+          MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+        run: |
+          if [ -z "$PR_DASHBOARD_APP_URL" ] || [ -z "$WEBHOOK_URL" ]; then exit 0; fi
+          
+          # Format the Merge Date
+          MERGE_DATE_DISPLAY=$(date -d "$MERGED_AT" "+%a, %d %b %Y %H:%M")
+
+          # Fetch commits from the merged PR
+          CHANGES=""
+          COMMITS_RESPONSE=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER/commits")
+          COMMITS_COUNT=$(echo "$COMMITS_RESPONSE" | jq 'length')
+          
+          if [ "$COMMITS_COUNT" -gt 0 ]; then
+            CHANGES=$(echo "$COMMITS_RESPONSE" | jq -r '.[] | "- " + .commit.message' | head -20 | sed 's/^//' | paste -sd $'\n' -)
+          else
+            CHANGES="No commits found."
+          fi
+          
+          # Helper to build rows for this step
+          build_row() {
+            jq -c -n --arg label "$1" --arg val "$2" \
+            '{ "type": "ColumnSet", "spacing": "Small", "columns": [ { "type": "Column", "width": "100px", "items": [{ "type": "TextBlock", "text": $label, "weight": "Bolder" }] }, { "type": "Column", "width": "stretch", "items": [{ "type": "TextBlock", "text": $val, "wrap": true }] } ] }'
+          }
+
+          R1=$(build_row "Repository" "$REPO")
+          R2=$(build_row "PR" "#$PR_NUMBER $PR_NAME")
+          R3=$(build_row "PR Link" "[$REPO/$PR_NUMBER]($PR_URL)")
+          R4=$(build_row "PR State" "merged")
+          R5=$(build_row "Merged At" "$MERGE_DATE_DISPLAY")
+          R6=$(build_row "Merged By" "$MERGED_BY")
+
+          BASE_URL=$(echo "$PR_DASHBOARD_APP_URL" | sed 's|/$||')
+          RELEASE_URL="$BASE_URL/create-release/$REPO_OWNER/$REPO_NAME"
+
+          PAYLOAD=$(jq -n \
+            --argjson r1 "$R1" --argjson r2 "$R2" --argjson r3 "$R3" --argjson r4 "$R4" --argjson r5 "$R5" --argjson r6 "$R6" \
+            --arg changes "$CHANGES" --arg url "$RELEASE_URL" \
+            '{
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.4",
+                  "body": [
+                    {"type": "TextBlock", "text": "Pull Request Merged", "size": "Large", "weight": "Bolder"},
+                    $r1, $r2, $r3, $r4, $r5, $r6,
+                    {"type": "TextBlock", "text": "Changes", "weight": "Bolder", "spacing": "Medium"},
+                    {"type": "TextBlock", "text": $changes, "wrap": true, "spacing": "Small", "isSubtle": true}
+                  ],
+                  "actions": [
+                    {"type": "Action.OpenUrl", "title": "Create a new release", "url": $url, "style": "positive"}
+                  ]
+                }
+              }]
+            }')
+
+          curl -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL"
