@@ -210,12 +210,13 @@ jobs:
 
             PROMPT_TEXT=""
             YES_URL=""
-            NO_URL="$PR_URL"
+            NO_URL=""
             if [ "$IS_APPROVED_REVIEW" = "true" ] && [ -n "$PR_DASHBOARD_APP_URL" ]; then
               BASE_URL=$(echo "$PR_DASHBOARD_APP_URL" | sed 's|/$||')
               REPO_ENC=$(printf '%s' "$REPO" | jq -sRr @uri)
               PR_URL_ENC=$(printf '%s' "$PR_URL" | jq -sRr @uri)
               YES_URL="$BASE_URL/api/approve-merge?pr=$PR_NUMBER&repo=$REPO_ENC&pr_url=$PR_URL_ENC"
+              NO_URL="$BASE_URL/api/deny-merge?pr=$PR_NUMBER&repo=$REPO_ENC&pr_url=$PR_URL_ENC"
               PROMPT_TEXT="**Allow merging?**"
             fi
 
