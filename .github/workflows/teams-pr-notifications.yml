@@ -118,6 +118,7 @@ jobs:
           ACTOR_URL: https://github.com/${{ github.actor }}.png
           EVENT_NAME: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
+          REVIEW_STATE: ${{ github.event.review.state }}
         run: |
           build_row() {
             local label="$1"; local val="$2"; local is_img="${3:-false}"; local img_url="${4:-}"
@@ -201,6 +202,23 @@ jobs:
               THEME_COLOR="D1242F"
             fi
 
+            REVIEW_STATE_LC=$(echo "${REVIEW_STATE:-}" | tr '[:upper:]' '[:lower:]')
+            IS_APPROVED_REVIEW="false"
+            if [ "$EVENT_NAME" = "pull_request_review" ] && [ "$EVENT_ACTION" = "submitted" ] && [ "$REVIEW_STATE_LC" = "approved" ]; then
+              IS_APPROVED_REVIEW="true"
+            fi
+
+            PROMPT_TEXT=""
+            YES_URL=""
+            NO_URL="$PR_URL"
+            if [ "$IS_APPROVED_REVIEW" = "true" ] && [ -n "$PR_DASHBOARD_APP_URL" ]; then
+              BASE_URL=$(echo "$PR_DASHBOARD_APP_URL" | sed 's|/$||')
+              REPO_ENC=$(printf '%s' "$REPO" | jq -sRr @uri)
+              PR_URL_ENC=$(printf '%s' "$PR_URL" | jq -sRr @uri)
+              YES_URL="$BASE_URL/api/approve-merge?pr=$PR_NUMBER&repo=$REPO_ENC&pr_url=$PR_URL_ENC"
+              PROMPT_TEXT="**Allow merging?**"
+            fi
+
             FACTS=$(jq -c -n \
               --arg repo "$REPO" \
               --arg pr "#$PR_NUMBER $PR_NAME" \
@@ -217,6 +235,10 @@ jobs:
               --arg actor "$ACTOR" \
               --arg actorUrl "$ACTOR_URL" \
               --arg color "$THEME_COLOR" \
+              --arg prompt "$PROMPT_TEXT" \
+              --arg yesUrl "$YES_URL" \
+              --arg noUrl "$NO_URL" \
+              --argjson isApproved "$IS_APPROVED_REVIEW" \
               --argjson facts "$FACTS" \
               '{
                 "@type": "MessageCard",
@@ -227,9 +249,14 @@ jobs:
                   "activityTitle": $title,
                   "activitySubtitle": ("By **" + $actor + "**"),
                   "activityImage": $actorUrl,
+                  "text": $prompt,
                   "facts": $facts,
                   "markdown": true
-                }]
+                }],
+                "potentialAction": (if $isApproved and ($yesUrl != "") then [
+                  {"@type":"OpenUri","name":"Yes","targets":[{"os":"default","uri":$yesUrl}]},
+                  {"@type":"OpenUri","name":"No","targets":[{"os":"default","uri":$noUrl}]}
+                ] else [] end)
               }')
 
             curl -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL"
