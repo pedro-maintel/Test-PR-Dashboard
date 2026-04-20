@@ -224,18 +224,19 @@ jobs:
               --arg pr "#$PR_NUMBER $PR_NAME" \
               --arg prLink "[$REPO/$PR_NUMBER]($PR_URL)" \
               --arg comment "$COMMENT_BODY" \
+              --arg prompt "$PROMPT_TEXT" \
+              --argjson isApproved "$IS_APPROVED_REVIEW" \
               '[
                 {"name":"Repository","value":$repo},
                 {"name":"PR","value":$pr},
                 {"name":"PR Link","value":$prLink}
-              ] + (if ($comment != "" and $comment != "null") then [{"name":"Comment","value":$comment}] else [] end)')
+              ] + (if ($comment != "" and $comment != "null") then [{"name":"Comment","value":$comment}] else [] end) + (if $isApproved and ($prompt != "") then [{"name":"","value":$prompt}] else [] end)')
 
             PAYLOAD=$(jq -c -n \
               --arg title "$TITLE" \
               --arg actor "$ACTOR" \
               --arg actorUrl "$ACTOR_URL" \
               --arg color "$THEME_COLOR" \
-              --arg prompt "$PROMPT_TEXT" \
               --arg yesUrl "$YES_URL" \
               --arg noUrl "$NO_URL" \
               --argjson isApproved "$IS_APPROVED_REVIEW" \
@@ -249,7 +250,6 @@ jobs:
                   "activityTitle": $title,
                   "activitySubtitle": ("By **" + $actor + "**"),
                   "activityImage": $actorUrl,
-                  "text": $prompt,
                   "facts": $facts,
                   "markdown": true
                 }],
