@@ -266,7 +266,8 @@ jobs:
 
           if [ "$IS_MERGED_STR" = "true" ] && [ -n "$PR_DASHBOARD_APP_URL" ]; then
             BASE_URL=$(echo "$PR_DASHBOARD_APP_URL" | sed 's|/$||')
-            RELEASE_URL="$BASE_URL/create-release/$REPO_OWNER/$REPO_NAME"
+            PR_URL_ENC=$(printf '%s' "$PR_URL" | jq -sRr @uri)
+            RELEASE_URL="$BASE_URL/create-release/$REPO_OWNER/$REPO_NAME?pr=$PR_NUMBER&pr_url=$PR_URL_ENC&source=teams"
             ACTIONS=$(echo "$ACTIONS" | jq -c --arg url "$RELEASE_URL" '. + [{"type":"Action.OpenUrl","title":"Create new release","url":$url,"style":"accent"}]')
           fi
 
@@ -321,7 +322,8 @@ jobs:
           R6=$(build_row "Merged By" "$MERGED_BY")
 
           BASE_URL=$(echo "$PR_DASHBOARD_APP_URL" | sed 's|/$||')
-          RELEASE_URL="$BASE_URL/create-release/$REPO_OWNER/$REPO_NAME"
+          PR_URL_ENC=$(printf '%s' "$PR_URL" | jq -sRr @uri)
+          RELEASE_URL="$BASE_URL/create-release/$REPO_OWNER/$REPO_NAME?pr=$PR_NUMBER&pr_url=$PR_URL_ENC&source=teams"
 
           PAYLOAD=$(jq -n \
             --argjson r1 "$R1" --argjson r2 "$R2" --argjson r3 "$R3" --argjson r4 "$R4" --argjson r5 "$R5" --argjson r6 "$R6" \
