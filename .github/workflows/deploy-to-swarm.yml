@@ -21,12 +21,14 @@ on:
 jobs:
   fake-deploy:
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment }}
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    env:
+      ENV_NAME: ${{ github.event.inputs.environment || 'dev' }}
     steps:
       - name: Print selected inputs
         run: |
           echo "image_tag=${{ github.event.inputs.image_tag }}"
-          echo "environment=${{ github.event.inputs.environment }}"
+          echo "environment=${ENV_NAME}"
 
       - name: Read TEST_PEDRO from GitHub env vars and print it
         env:
