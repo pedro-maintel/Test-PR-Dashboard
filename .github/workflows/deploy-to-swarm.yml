@@ -1,0 +1,188 @@
+name: Deploy to Docker Swarm
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag to deploy (default: latest)'
+        required: false
+        default: 'latest'
+      environment:
+        description: 'Environment to deploy to (default: dev)'
+        required: false
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - qa
+          - stag
+          - prod
+
+
+env:
+  BUILD_DIRECTORY: src
+
+
+permissions:
+    contents: read
+    packages: read
+    deployments: write
+    id-token: write
+
+jobs:
+  setup_runner:
+    runs-on: ubuntu-latest
+    outputs:
+      runner_group: ${{ steps.set_runner_group.outputs.runner_group }}
+    env:
+      RUNNER_MAP: |
+        dev:
+          - dev-docker-swarm-managers
+        qa:
+          - qa-docker-swarm-managers
+        stag:
+          - stag-docker-swarm-managers
+        prod:
+          - prod-docker-swarm-managers
+    steps:
+      - name: Print Runner Group
+        id: set_runner_group
+        run: |
+          RUNNER_GROUP=$(echo '${{ env.RUNNER_MAP }}' | yq eval '.${{ github.event.inputs.environment }}[0]' -)
+          echo "runner_group=$RUNNER_GROUP" >> $GITHUB_OUTPUT
+          echo "Resolved runner group: $RUNNER_GROUP"
+  prepare_stack:
+    needs: setup_runner
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Evaluate image tag
+        run: |
+          if [[ ! "${{ github.ref_name }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "${{ github.ref_name }} - Not a version tag, using date as version"
+            echo "VERSION=$(TZ='Europe/London' date +'%y.%m.%d.%H%M')" >> $GITHUB_ENV
+          else
+            echo "Version tag detected: ${{ github.ref_name }}"
+            echo "VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
+          fi
+
+      - name: Set image tag
+        run: |
+          echo "Using image tag: $VERSION"
+          echo "IMAGE_TAG=$VERSION" >> $GITHUB_ENV
+
+      - name: Prepare stack file
+        run: |
+          if [ "${{ github.event.inputs.environment }}" != "dev" ]; then
+            cp stack/iquote2-api-stack.yml stack/iquote2-api-stack-${{ github.event.inputs.environment }}.yml
+            sed -i 's|traefik.http.routers.iquote-api-dev|traefik.http.routers.iquote-api-${{ github.event.inputs.environment }}|g' stack/iquote2-api-stack-${{ github.event.inputs.environment }}.yml
+            sed -i 's|traefik.http.services.iquote-api-dev|traefik.http.services.iquote-api-${{ github.event.inputs.environment }}|g' stack/iquote2-api-stack-${{ github.event.inputs.environment }}.yml
+            sed -i 's|iquote2apiapi.dev.maintelcds.com|iquote2apiapi.${{ github.event.inputs.environment }}.maintelcds.com|g' stack/iquote2-api-stack-${{ github.event.inputs.environment }}.yml
+            sed -i 's|- iquote2-api|- iquote2-api-${{ github.event.inputs.environment }}|g' stack/iquote2-api-stack-${{ github.event.inputs.environment }}.yml
+            STACK_FILE="stack/iquote2-api-stack-${{ github.event.inputs.environment }}.yml"
+          else
+            STACK_FILE="stack/iquote2-api-stack.yml"
+          fi
+
+          sed -i 's|ghcr.io/maintel-icon/iquote2-api:main|ghcr.io/maintel-icon/iquote2-api:${{ env.IMAGE_TAG }}|g' $STACK_FILE
+          sed -i 's|__COGNITO_USER_POOL_ID__|${{ vars.COGNITO_USER_POOL_ID }}|g' ${{ env.BUILD_DIRECTORY }}/appsettings.deploy.json
+          sed -i 's|__COGNITO_WEB_CLIENT_ID__|${{ vars.COGNITO_WEB_CLIENT_ID }}|g' ${{ env.BUILD_DIRECTORY }}/appsettings.deploy.json
+          sed -i 's|__DB_USERNAME__|${{ secrets.DB_USERNAME }}|g' $STACK_FILE
+          sed -i 's|__DB_PASSWORD__|${{ secrets.DB_PASSWORD }}|g' $STACK_FILE
+          sed -i 's|__DB_SERVER__|${{ vars.DB_SERVER }}|g' $STACK_FILE
+          sed -i 's|__FRONTEND_URL__|${{ vars.FRONTEND_URL }}|g' $STACK_FILE
+          sed -i 's|__LOGGING_LEVEL__|${{ vars.LOGGING_LEVEL }}|g' $STACK_FILE
+          sed -i 's|__ENVIRONMENT__|${{ github.event.inputs.environment }}|g' $STACK_FILE
+
+          echo "STACK_FILE=$STACK_FILE" >> $GITHUB_ENV
+          echo "Updated stack file:"
+          cat $STACK_FILE
+
+      - name: Upload stack file as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stack-file-${{ github.event.inputs.environment }}
+          path: ${{ env.STACK_FILE }}
+          retention-days: 1
+
+  deploy:
+    needs: [setup_runner, prepare_stack]
+    runs-on:
+      group: ${{ needs.setup_runner.outputs.runner_group }}
+    environment:
+      name: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Download stack file artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: stack-file-${{ github.event.inputs.environment }}
+          path: ./stack-files
+
+      - name: Copy stack file to deployment location
+        run: |
+          mkdir -p /mnt/efs/stacks
+          cp -r ./stack-files/* /mnt/efs/stacks/
+
+          if [ "${{ github.event.inputs.environment }}" != "dev" ]; then
+            STACK_FILE="/mnt/efs/stacks/iquote2-api-stack-${{ github.event.inputs.environment }}.yml"
+            STACK_NAME="iquote2-api"
+          else
+            STACK_FILE="/mnt/efs/stacks/iquote2-api-stack.yml"
+            STACK_NAME="iquote2-api"
+          fi
+
+          echo "STACK_FILE=$STACK_FILE" >> $GITHUB_ENV
+          echo "STACK_NAME=$STACK_NAME" >> $GITHUB_ENV
+
+      - name: Login to GitHub Container Registry
+        run: |
+          echo ${{ secrets.GHCR_TOKEN }} | docker login ghcr.io -u ${{ vars.GHCR_ACTOR }} --password-stdin
+
+      - name: Deploy stack to Docker Swarm
+        run: |
+          # If the stack already exists, perform a stack deploy (to update compose) then force-update each service
+          if docker stack ls --format "{{.Name}}" | grep -x "$STACK_NAME" > /dev/null 2>&1; then
+            echo "Stack '$STACK_NAME' exists. Deploying stack and forcing service updates."
+            docker stack deploy --with-registry-auth -c "$STACK_FILE" "$STACK_NAME"
+
+            # List services for the stack and force a rolling update by using --force
+            echo "Forcing service update for services in stack: $STACK_NAME"
+            docker stack services "$STACK_NAME" --format "{{.Name}}" | while read -r svc; do
+              # Ensure we only target services in this stack (name includes stack name prefix)
+              if [ -n "$svc" ]; then
+                echo "Updating service: $svc"
+                docker service update --force "$svc" || echo "Failed to update $svc"
+              fi
+            done
+          else
+            echo "Stack '$STACK_NAME' does not exist. Deploying new stack."
+            docker stack deploy --with-registry-auth -c "$STACK_FILE" "$STACK_NAME"
+          fi
+
+      - name: Verify deployment
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Deployed Stack Details:" >> $GITHUB_STEP_SUMMARY
+          echo "| ID | NAME | MODE | REPLICAS | IMAGE | PORTS |" >> $GITHUB_STEP_SUMMARY
+          echo "|----|------|------|----------|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          docker stack services $STACK_NAME --format "{{.ID}} | {{.Name}} | {{.Mode}} | {{.Replicas}} | {{.Image}} | {{.Ports}}" >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Waiting for service to be fully deployed..." | tee -a $GITHUB_STEP_SUMMARY
+          sleep 5
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Service List:" >> $GITHUB_STEP_SUMMARY
+          echo "| ID | NAME | MODE | REPLICAS | IMAGE |" >> $GITHUB_STEP_SUMMARY
+          echo "|----|------|------|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          docker service ls --filter name=$STACK_NAME --format "{{.ID}} | {{.Name}} | {{.Mode}} | {{.Replicas}} | {{.Image}}" >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Service Logs:" | tee -a $GITHUB_STEP_SUMMARY
+          docker service ls --filter name=$STACK_NAME --format "{{.ID}}" | xargs -I {} docker service logs --tail 10 {} | tee -a $GITHUB_STEP_SUMMARY
